@@ -24,7 +24,13 @@ First commit Jul 6, 2026 · Busiest day 24 commits · 5.2 commits per active day
 
 ## Install
 
-**Windows** (PowerShell 5.1 or 7):
+**Any OS with PowerShell**, from the [PowerShell Gallery](https://www.powershellgallery.com/packages/TrueCommit):
+
+```powershell
+Install-Module TrueCommit -Scope CurrentUser
+```
+
+**Windows** without the Gallery (PowerShell 5.1 or 7):
 
 ```powershell
 irm https://raw.githubusercontent.com/nyad-dev/TrueCommit/main/install.ps1 | iex

@@ -1,0 +1,29 @@
+name: test
+on: [push, pull_request]
+jobs:
+  run:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      # -Author . matches every author: the runner has no user.email.
+      - name: install.sh + bash command
+        if: runner.os != 'Windows'
+        run: sh ./install.sh && ~/.local/bin/truecommit -Author . | tee /dev/stderr | grep -q 'Total commits'
+      - name: PowerShell 7
+        shell: pwsh
+        run: |
+          ./install.ps1
+          $o = truecommit -Author . 6>&1 | Out-String; $o
+          if ($o -notmatch 'Total commits') { exit 1 }
+      - name: Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          ./install.ps1
+          $o = truecommit -Author . 6>&1 | Out-String; $o
+          if ($o -notmatch 'Total commits') { exit 1 }

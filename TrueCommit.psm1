@@ -17,7 +17,7 @@ function Find-GitRepo([string]$Root, [int]$Depth) {
         if (Test-Path -LiteralPath (Join-Path $dir '.git')) { $dir; continue }
         if ($d -ge $Depth) { continue }
         Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notmatch '^(\..*|node_modules|AppData|\$Recycle\.Bin)$' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+            Where-Object { $_.Name -notmatch '^(\..*|node_modules|AppData|Library|\$Recycle\.Bin)$' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
             ForEach-Object { $queue.Enqueue(@($_.FullName, ($d + 1))) }
     }
 }
@@ -82,7 +82,7 @@ function Show-TrueCommit {
         $who = $Author
         if (-not $who) {
             # Repo-local email from .git/config without spawning git (worktrees have a .git file, not a folder).
-            $cfg = Join-Path $repo '.git\config'
+            $cfg = "$repo/.git/config"
             $local = if (Test-Path -LiteralPath $cfg -PathType Leaf) { Select-String -LiteralPath $cfg -Pattern '^\s*email\s*=\s*(\S+)' | Select-Object -First 1 }
             $who = if ($local) { $local.Matches[0].Groups[1].Value } else { $globalEmail }
         }

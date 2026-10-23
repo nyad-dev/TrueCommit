@@ -24,19 +24,20 @@ First commit Jul 6, 2026 · Busiest day 24 commits · 5.2 commits per active day
 
 ## Install
 
-From the PowerShell Gallery:
-
-```powershell
-Install-Module TrueCommit -Scope CurrentUser
-```
-
-Or straight from GitHub:
+**Windows** (PowerShell 5.1 or 7):
 
 ```powershell
 irm https://raw.githubusercontent.com/nyad-dev/TrueCommit/main/install.ps1 | iex
 ```
 
-Works in Windows PowerShell 5.1 and PowerShell 7. Needs a terminal with true-color support (Windows Terminal).
+**Linux / macOS** (needs [PowerShell 7](https://aka.ms/install-powershell), e.g. `brew install powershell`).
+This also adds a `truecommit` command to `~/.local/bin` so it runs straight from bash or zsh:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nyad-dev/TrueCommit/main/install.sh | sh
+```
+
+Needs a terminal with true-color support (Windows Terminal, iTerm2, most Linux terminals).
 
 ## Use
 

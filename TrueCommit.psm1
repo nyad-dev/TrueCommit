@@ -1,7 +1,8 @@
-# TrueCommit - GitHub-style heatmap of your *local* git commits (pushed or not).
+# TrueCommit - GitHub-style heatmap of your *local* git commits (pushed or not), optionally merged with GitHub's.
 
 $e = [char]27
-$Orange = '215;119;87'; $Dim = '110;110;110'; $Lilac = '177;185;249'
+$Colors = [ordered]@{ orange = '215;119;87'; green = '57;211;83'; blue = '88;166;255'; purple = '163;113;247'; pink = '219;97;162' }
+$Dim = '110;110;110'; $Lilac = '177;185;249'
 $Dot = [char]0x00B7   # non-ASCII chars stay in code so Windows PowerShell 5.1 can read this file without a BOM
 function Paint([string]$rgb, [string]$s, [switch]$Bold) {
     $b = if ($Bold) { "$e[1m" } else { '' }
@@ -31,6 +32,37 @@ function Start-Git([string]$Repo, [string[]]$GitArgs) {
     $p
 }
 
+function Get-GitHubCommitDays([datetime]$From) {
+    # One row per repo and day: @{ Slug = 'owner/name'; Date = 'yyyy-MM-dd'; Count = n }.
+    # contributions(first:100) is capped, so ask in four ~93-day chunks: no repo can pass 100 days inside one.
+    $now = [datetime]::UtcNow; $fmt = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+    $chunks = for ($i = 0; $i -lt 4; $i++) {
+        $a = $From.ToUniversalTime().AddDays(93 * $i); $b = $a.AddDays(93)
+        if ($a -ge $now) { break }
+        if ($b -gt $now) { $b = $now }
+        "q${i}: contributionsCollection(from: `"$($a.ToString($fmt))`", to: `"$($b.ToString($fmt))`") { ...c }"
+    }
+    $query = "query { viewer { $($chunks -join ' ') } } fragment c on ContributionsCollection { commitContributionsByRepository(maxRepositories: 100) { repository { nameWithOwner } contributions(first: 100) { nodes { occurredAt commitCount } } } }"
+    $body = @{ query = $query } | ConvertTo-Json -Compress
+    # GITHUB_TOKEN first, else borrow the GitHub CLI's login (piping the query into gh garbles it on 5.1).
+    $token = $env:GITHUB_TOKEN
+    if (-not $token -and (Get-Command gh -ErrorAction SilentlyContinue)) { $token = gh auth token 2>$null; $global:LASTEXITCODE = 0 }
+    $res = if ($token) {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12   # 5.1 may default to TLS 1.0
+        try { Invoke-RestMethod -Method Post -Uri 'https://api.github.com/graphql' -Headers @{ Authorization = "bearer $token" } -Body $body } catch { $null }
+    }
+    if (-not $res.data.viewer) { Write-Warning 'Could not read GitHub: run "gh auth login" or set $env:GITHUB_TOKEN. Showing local commits only.'; return }
+    foreach ($chunk in $res.data.viewer.PSObject.Properties.Value) {
+        foreach ($r in $chunk.commitContributionsByRepository) {
+            foreach ($n in $r.contributions.nodes) {
+                # PowerShell 7 turns ISO strings into dates, 5.1 doesn't. Days come stamped 07:00Z (US Pacific midnight), so the UTC date is the day.
+                $day = if ($n.occurredAt -is [datetime]) { $n.occurredAt.ToUniversalTime().ToString('yyyy-MM-dd') } else { $n.occurredAt.Substring(0, 10) }
+                @{ Slug = $r.repository.nameWithOwner.ToLower(); Name = $r.repository.nameWithOwner.Split('/')[1]; Date = $day; Count = [int]$n.commitCount }
+            }
+        }
+    }
+}
+
 function Get-Streaks([string[]]$ActiveDays, [datetime]$Today) {
     $set = [System.Collections.Generic.HashSet[string]]::new([string[]]$ActiveDays)
     $longest = 0; $run = 0; $prev = $null
@@ -57,6 +89,8 @@ function Show-TrueCommit {
     truecommit -All         # every repo under your user folder
     .EXAMPLE
     truecommit D:\code -Range 30d -Author me@example.com
+    .EXAMPLE
+    truecommit -All -GitHub -Color green   # add commits that are only on GitHub, in GitHub green
     #>
     [CmdletBinding()]
     param(
@@ -64,9 +98,15 @@ function Show-TrueCommit {
         [switch]$All,
         [ValidateSet('all', '30d', '7d')][string]$Range = 'all',
         [string]$Author,
-        [int]$Depth = 5
+        [int]$Depth = 5,
+        [string]$Color = $env:TRUECOMMIT_COLOR,
+        [switch]$GitHub
     )
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'git was not found on PATH.' }
+    if (-not $Color) { $Color = 'orange' }
+    $Accent = if ($Colors[$Color]) { $Colors[$Color] }
+        elseif ($Color -match '^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$') { ($Matches[1], $Matches[2], $Matches[3] | ForEach-Object { [Convert]::ToInt32($_, 16) }) -join ';' }
+        else { throw "Unknown color '$Color'. Use $($Colors.Keys -join ', ') or a hex value like #39d353." }
 
     $root = if ($All) { if ($env:TRUECOMMIT_ROOT) { $env:TRUECOMMIT_ROOT } else { $HOME } } else { (Resolve-Path -LiteralPath $Path).Path }
     $top = if (-not $All) { git -C $root rev-parse --show-toplevel 2>$null }
@@ -77,39 +117,57 @@ function Show-TrueCommit {
     $global:LASTEXITCODE = 0   # "not a repo" / "no email" are expected answers, not failures for the caller
     $seen = [System.Collections.Generic.HashSet[string]]::new()
     $commits = [System.Collections.Generic.List[object]]::new()
-    $unpushed = 0
+    $unpushedSet = [System.Collections.Generic.HashSet[string]]::new()
     # Each git start costs ~0.3s on Windows, so launch every repo's queries at once, then collect.
     $jobs = foreach ($repo in $repos) {
+        # Read .git/config directly instead of spawning git (worktrees have a .git file, not a folder).
+        $cfg = "$repo/.git/config"
+        $cfgText = if (Test-Path -LiteralPath $cfg -PathType Leaf) { Get-Content -LiteralPath $cfg -Raw } else { '' }
         $who = $Author
-        if (-not $who) {
-            # Repo-local email from .git/config without spawning git (worktrees have a .git file, not a folder).
-            $cfg = "$repo/.git/config"
-            $local = if (Test-Path -LiteralPath $cfg -PathType Leaf) { Select-String -LiteralPath $cfg -Pattern '^\s*email\s*=\s*(\S+)' | Select-Object -First 1 }
-            $who = if ($local) { $local.Matches[0].Groups[1].Value } else { $globalEmail }
-        }
+        if (-not $who) { $who = if ($cfgText -match '(?m)^\s*email\s*=\s*(\S+)') { $Matches[1] } else { $globalEmail } }
         $filter = @(if ($who) { "--author=$who" })
         # No --shortstat: diffing big binary assets made it ~15x slower.
         [pscustomobject]@{
-            Name = Split-Path $repo -Leaf
-            Log  = Start-Git $repo (@('log', '--all', '--no-merges', '--date=short', '--format=%H%x20%ad') + $filter)
-            Ahead = Start-Git $repo (@('rev-list', '--count', '--no-merges', '--all', '--not', '--remotes') + $filter)
+            Name  = Split-Path $repo -Leaf
+            Slug  = $(if ($cfgText -match '(?m)^\s*url\s*=\s*\S*github\.com[:/]([^/\s]+/[^/\s]+?)(\.git)?/?\s*$') { $Matches[1].ToLower() })
+            Log   = Start-Git $repo (@('log', '--all', '--no-merges', '--date=short', '--format=%H%x20%ad') + $filter)
+            Ahead = Start-Git $repo (@('rev-list', '--no-merges', '--all', '--not', '--remotes') + $filter)
         }
     }
     foreach ($j in $jobs) {
+        foreach ($h in $j.Ahead.StandardOutput.ReadToEnd().Split("`n", [StringSplitOptions]::RemoveEmptyEntries)) { $null = $unpushedSet.Add($h.Trim()) }
         foreach ($line in $j.Log.StandardOutput.ReadToEnd().Split("`n", [StringSplitOptions]::RemoveEmptyEntries)) {
             $h, $date = $line.Trim().Split(' ')
-            if ($seen.Add($h)) { $commits.Add([pscustomobject]@{ Date = $date; Repo = $j.Name }) }
+            if ($seen.Add($h)) { $commits.Add([pscustomobject]@{ Date = $date; Repo = $j.Name; Slug = $j.Slug; Pushed = -not $unpushedSet.Contains($h) }) }
         }
-        $n = $j.Ahead.StandardOutput.ReadToEnd().Trim()
-        if ($n) { $unpushed += [int]$n }
     }
+    $unpushed = $unpushedSet.Count
+    $repoCount = $repos.Count
 
     $today = (Get-Date).Date
+    $start = $today.AddDays(-364); $start = $start.AddDays(-[int]$start.DayOfWeek)
+
+    if ($GitHub) {
+        # GitHub only reports commit counts per repo and day, so it can't be matched by hash. Per repo and day,
+        # add only what GitHub has beyond the pushed commits found locally - that part was made on another machine.
+        $local = @{}; $nameOf = @{}
+        foreach ($j in $jobs) { if ($j.Slug) { $nameOf[$j.Slug] = $j.Name } }
+        foreach ($c in $commits) { if ($c.Pushed -and $c.Slug) { $local["$($c.Slug)|$($c.Date)"] = 1 + [int]$local["$($c.Slug)|$($c.Date)"] } }
+        $ghOnly = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($r in (Get-GitHubCommitDays $start)) {
+            if ($top -and $r.Slug -ne $jobs[0].Slug) { continue }   # single-repo view: only that repo's GitHub side
+            $name = if ($nameOf[$r.Slug]) { $nameOf[$r.Slug] } else { $null = $ghOnly.Add($r.Slug); $r.Name }
+            for ($i = [int]$local["$($r.Slug)|$($r.Date)"]; $i -lt $r.Count; $i++) {
+                $commits.Add([pscustomobject]@{ Date = $r.Date; Repo = $name; Slug = $r.Slug; Pushed = $true })
+            }
+        }
+        $repoCount += $ghOnly.Count
+    }
+
     $byDay = @{}
     foreach ($c in $commits) { $byDay[$c.Date] = 1 + [int]$byDay[$c.Date] }
 
     # --- Heatmap: last 53 weeks, Sunday-first columns like GitHub ---
-    $start = $today.AddDays(-364); $start = $start.AddDays(-[int]$start.DayOfWeek)
     $weeks = [int][math]::Floor(($today - $start).Days / 7) + 1
     $inWindow = @(for ($d = $start; $d -le $today; $d = $d.AddDays(1)) { [int]$byDay[$d.ToString('yyyy-MM-dd')] }) | Where-Object { $_ } | Sort-Object
     $q = if ($inWindow) { 1..3 | ForEach-Object { $inWindow[[math]::Floor($inWindow.Count * $_ / 4)] } } else { 1, 1, 1 }
@@ -126,7 +184,7 @@ function Show-TrueCommit {
     $out = @('', ('    ' + (-join $header).TrimEnd()))
     $labels = @{ 1 = 'Mon '; 3 = 'Wed '; 5 = 'Fri ' }
     # Paint once, index per cell: calling Paint 370 times costs ~1s on Windows PowerShell.
-    $cell = @(Paint $Dim $Dot) + @(0..3 | ForEach-Object { Paint $Orange $shades[$_] })
+    $cell = @(Paint $Dim $Dot) + @(0..3 | ForEach-Object { Paint $Accent $shades[$_] })
     for ($row = 0; $row -lt 7; $row++) {
         $cells = for ($w = 0; $w -lt $weeks; $w++) {
             $d = $start.AddDays($w * 7 + $row)
@@ -138,12 +196,12 @@ function Show-TrueCommit {
         $out += $label + (-join $cells)
     }
     $out += ''
-    $out += '    Less ' + ((0..3 | ForEach-Object { Paint $Orange $shades[$_] }) -join ' ') + ' More'
+    $out += '    Less ' + ((0..3 | ForEach-Object { Paint $Accent $shades[$_] }) -join ' ') + ' More'
     $out += ''
 
     # --- Range tabs ---
     $tabs = [ordered]@{ all = 'All time'; '7d' = 'Last 7 days'; '30d' = 'Last 30 days' }
-    $out += ($tabs.Keys | ForEach-Object { if ($_ -eq $Range) { Paint $Orange $tabs[$_] -Bold } else { Paint $Dim $tabs[$_] } }) -join (Paint $Dim " $Dot ")
+    $out += ($tabs.Keys | ForEach-Object { if ($_ -eq $Range) { Paint $Accent $tabs[$_] -Bold } else { Paint $Dim $tabs[$_] } }) -join (Paint $Dim " $Dot ")
     $out += ''
 
     # --- Stats for the selected range ---
@@ -163,11 +221,11 @@ function Show-TrueCommit {
     $fav = $perRepo.Keys | Sort-Object { $perRepo[$_] } -Descending | Select-Object -First 1
     $activeRepos = $perRepo.Count
 
-    $kv = { param($k, $v, $extra) @{ Plain = "${k}: $v$extra"; Ansi = "${k}: " + (Paint $Orange $v) + $(if ($extra) { Paint $Dim $extra }) } }
+    $kv = { param($k, $v, $extra) @{ Plain = "${k}: $v$extra"; Ansi = "${k}: " + (Paint $Accent $v) + $(if ($extra) { Paint $Dim $extra }) } }
     $rows = @(
         @((& $kv 'Favorite repo' $fav), (& $kv 'Total commits' $sel.Count)),
         @(@{ Plain = ''; Ansi = '' }, @{ Plain = ''; Ansi = '' }),
-        @((& $kv 'Repos' $activeRepos "/$($repos.Count)"), (& $kv 'Unpushed' $unpushed)),
+        @((& $kv 'Repos' $activeRepos "/$repoCount"), (& $kv 'Unpushed' $unpushed)),
         @((& $kv 'Active days' $dayNames.Count "/$span"), (& $kv 'Longest streak' "$longest" ' days')),
         @((& $kv 'Most active day' ([datetime]$topDay).ToString('MMM d', [cultureinfo]::InvariantCulture)), (& $kv 'Current streak' "$current" ' days'))
     )

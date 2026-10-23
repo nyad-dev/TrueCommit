@@ -53,7 +53,25 @@ truecommit D:\code            # every repo below D:\code
 truecommit -All               # every repo under your user folder (or $env:TRUECOMMIT_ROOT)
 truecommit -Range 30d         # stats for the last 30 days (also: 7d, all)
 truecommit -Author me@x.com   # someone else's commits / a different email
+truecommit -GitHub            # also count commits that are only on GitHub (made on other machines)
+truecommit -Color green       # orange (default), green, blue, purple, pink, or any hex like #39d353
 ```
+
+To keep a color, set it once in your `$PROFILE` (or shell rc on Linux/macOS):
+
+```powershell
+$env:TRUECOMMIT_COLOR = 'green'
+```
+
+### GitHub commits
+
+`-GitHub` reads your GitHub contribution data for the last year, using your `gh` login or `$env:GITHUB_TOKEN`.
+GitHub only reports how many commits you made per repo per day, so TrueCommit adds whatever GitHub has
+beyond the pushed commits it already found locally for that repo and day. Nothing is counted twice.
+In a single repo it only adds that repo's GitHub commits; in folder or `-All` mode it adds all of them.
+
+GitHub itself only counts commits on a repo's default branch, made with an email linked to your account.
+For private repos, "Include private contributions on my profile" may also need to be on.
 
 Commits are matched by each repo's `user.email` (falling back to your global one), de-duplicated across
 clones, and merge commits are skipped. "Unpushed" counts your commits that no remote-tracking branch contains.

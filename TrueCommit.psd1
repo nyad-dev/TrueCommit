@@ -1,6 +1,6 @@
 @{
 RootModule = 'TrueCommit.psm1'
-ModuleVersion = '0.1.0'
+ModuleVersion = '0.2.0'
 GUID = 'dfef7391-7fec-4de7-8e4a-b3e440591db0'
 Author = 'nyad-dev'
 CompanyName = 'Unknown'

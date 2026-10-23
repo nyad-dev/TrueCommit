@@ -3,6 +3,8 @@
 $e = [char]27
 $Colors = [ordered]@{ orange = '215;119;87'; green = '57;211;83'; blue = '88;166;255'; purple = '163;113;247'; pink = '219;97;162' }
 $Dim = '110;110;110'; $Lilac = '177;185;249'
+# -Lines ignores these paths: vendored folders, lockfiles, and data/asset formats that tools write, not people.
+$NotCode = '(^|/)(vendor|third_party|node_modules|dist|build)/|\.(json|lock|obj|gltf|svg|csv|tsv|rbxmx|rbxlx|map|snap)}?$|\.min\.js$|(^|/)(yarn\.lock|pnpm-lock\.yaml|go\.sum)$'
 $Dot = [char]0x00B7   # non-ASCII chars stay in code so Windows PowerShell 5.1 can read this file without a BOM
 function Paint([string]$rgb, [string]$s, [switch]$Bold) {
     $b = if ($Bold) { "$e[1m" } else { '' }
@@ -91,6 +93,8 @@ function Show-TrueCommit {
     truecommit D:\code -Range 30d -Author me@example.com
     .EXAMPLE
     truecommit -All -GitHub -Color green   # add commits that are only on GitHub, in GitHub green
+    .EXAMPLE
+    truecommit -All -Lines  # lines of code changed instead of commits
     #>
     [CmdletBinding()]
     param(
@@ -100,7 +104,8 @@ function Show-TrueCommit {
         [string]$Author,
         [int]$Depth = 5,
         [string]$Color = $env:TRUECOMMIT_COLOR,
-        [switch]$GitHub
+        [switch]$GitHub,
+        [switch]$Lines
     )
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'git was not found on PATH.' }
     if (-not $Color) { $Color = 'orange' }
@@ -126,19 +131,32 @@ function Show-TrueCommit {
         $who = $Author
         if (-not $who) { $who = if ($cfgText -match '(?m)^\s*email\s*=\s*(\S+)') { $Matches[1] } else { $globalEmail } }
         $filter = @(if ($who) { "--author=$who" })
-        # No --shortstat: diffing big binary assets made it ~15x slower.
+        # --numstat only with -Lines: diffing every commit is 3-15x slower than listing them.
+        $stat = @(if ($Lines) { '--numstat' })
         [pscustomobject]@{
             Name  = Split-Path $repo -Leaf
             Slug  = $(if ($cfgText -match '(?m)^\s*url\s*=\s*\S*github\.com[:/]([^/\s]+/[^/\s]+?)(\.git)?/?\s*$') { $Matches[1].ToLower() })
-            Log   = Start-Git $repo (@('log', '--all', '--no-merges', '--date=short', '--format=%H%x20%ad') + $filter)
+            Log   = Start-Git $repo (@('log', '--all', '--no-merges', '--date=short', '--format=%H%x20%ad') + $stat + $filter)
             Ahead = Start-Git $repo (@('rev-list', '--no-merges', '--all', '--not', '--remotes') + $filter)
         }
     }
+    $skipped = 0
     foreach ($j in $jobs) {
         foreach ($h in $j.Ahead.StandardOutput.ReadToEnd().Split("`n", [StringSplitOptions]::RemoveEmptyEntries)) { $null = $unpushedSet.Add($h.Trim()) }
+        $c = $null
         foreach ($line in $j.Log.StandardOutput.ReadToEnd().Split("`n", [StringSplitOptions]::RemoveEmptyEntries)) {
+            if ($line -match '^(\d+)\t(\d+)\t(.*)') {
+                # One file of the current commit. Data/asset exports, vendored code and any file with 5000+ changed
+                # lines aren't written by hand - in one Roblox repo .rbxlx saves alone were 1.8M "lines".
+                if (-not $c) { continue }
+                $add = [int]$Matches[1]; $del = [int]$Matches[2]
+                if ($add + $del -gt 5000 -or $Matches[3] -match $NotCode) { $skipped++ } else { $c.Add += $add; $c.Del += $del }
+                continue
+            }
+            if ($line -notmatch '^[0-9a-f]{40} ') { continue }   # binary files show as "-<tab>-<tab>path"
             $h, $date = $line.Trim().Split(' ')
-            if ($seen.Add($h)) { $commits.Add([pscustomobject]@{ Date = $date; Repo = $j.Name; Slug = $j.Slug; Pushed = -not $unpushedSet.Contains($h) }) }
+            $c = if ($seen.Add($h)) { [pscustomobject]@{ Date = $date; Repo = $j.Name; Slug = $j.Slug; Pushed = -not $unpushedSet.Contains($h); Add = 0; Del = 0; Weight = 1 } }
+            if ($c) { $commits.Add($c) }
         }
     }
     $unpushed = $unpushedSet.Count
@@ -147,7 +165,8 @@ function Show-TrueCommit {
     $today = (Get-Date).Date
     $start = $today.AddDays(-364); $start = $start.AddDays(-[int]$start.DayOfWeek)
 
-    if ($GitHub) {
+    if ($GitHub -and $Lines) { Write-Warning 'GitHub only reports commit counts, not lines, so -GitHub adds nothing to -Lines.' }
+    elseif ($GitHub) {
         # GitHub only reports commit counts per repo and day, so it can't be matched by hash. Per repo and day,
         # add only what GitHub has beyond the pushed commits found locally - that part was made on another machine.
         $local = @{}; $nameOf = @{}
@@ -158,14 +177,17 @@ function Show-TrueCommit {
             if ($top -and $r.Slug -ne $jobs[0].Slug) { continue }   # single-repo view: only that repo's GitHub side
             $name = if ($nameOf[$r.Slug]) { $nameOf[$r.Slug] } else { $null = $ghOnly.Add($r.Slug); $r.Name }
             for ($i = [int]$local["$($r.Slug)|$($r.Date)"]; $i -lt $r.Count; $i++) {
-                $commits.Add([pscustomobject]@{ Date = $r.Date; Repo = $name; Slug = $r.Slug; Pushed = $true })
+                $commits.Add([pscustomobject]@{ Date = $r.Date; Repo = $name; Slug = $r.Slug; Pushed = $true; Add = 0; Del = 0; Weight = 1 })
             }
         }
         $repoCount += $ghOnly.Count
     }
 
+    # Everything below weighs a commit as 1, or with -Lines as its changed lines; a day of only binary changes stays empty.
+    $unit = if ($Lines) { 'lines' } else { 'commits' }
+    if ($Lines) { foreach ($c in $commits) { $c.Weight = $c.Add + $c.Del } }
     $byDay = @{}
-    foreach ($c in $commits) { $byDay[$c.Date] = 1 + [int]$byDay[$c.Date] }
+    foreach ($c in $commits) { if ($c.Weight) { $byDay[$c.Date] = $c.Weight + [int]$byDay[$c.Date] } }
 
     # --- Heatmap: last 53 weeks, Sunday-first columns like GitHub ---
     $weeks = [int][math]::Floor(($today - $start).Days / 7) + 1
@@ -212,8 +234,10 @@ function Show-TrueCommit {
     if (-not $sel.Count) { $out += Paint $Dim 'No commits in this range.'; $out | Write-Host; return }
 
     $perRepo = @{}
-    foreach ($c in $sel) { $perRepo[$c.Repo] = 1 + [int]$perRepo[$c.Repo] }
+    foreach ($c in $sel) { if ($c.Weight) { $perRepo[$c.Repo] = $c.Weight + [int]$perRepo[$c.Repo] } }
     $dayNames = @($byDay.Keys.Where({ $_ -ge $fromS -and $_ -le $todayS }) | Sort-Object)
+    if (-not $dayNames) { $out += Paint $Dim "No $unit in this range."; $out | Write-Host; return }
+    $total = ($perRepo.Values | Measure-Object -Sum).Sum
     $first = $dayNames[0]
     $span = if ($Range -eq 'all') { ($today - [datetime]$first).Days + 1 } else { ($today - $from).Days + 1 }
     $longest, $current = Get-Streaks $dayNames $today
@@ -223,7 +247,10 @@ function Show-TrueCommit {
 
     $kv = { param($k, $v, $extra) @{ Plain = "${k}: $v$extra"; Ansi = "${k}: " + (Paint $Accent $v) + $(if ($extra) { Paint $Dim $extra }) } }
     $rows = @(
-        @((& $kv 'Favorite repo' $fav), (& $kv 'Total commits' $sel.Count)),
+        @((& $kv 'Favorite repo' $fav), $(if ($Lines) {
+            $add = ($sel | Measure-Object Add -Sum).Sum; $del = ($sel | Measure-Object Del -Sum).Sum
+            @{ Plain = ('Lines: +{0:N0} -{1:N0}' -f $add, $del); Ansi = 'Lines: ' + (Paint $Accent ('+{0:N0}' -f $add)) + ' ' + (Paint $Dim ('-{0:N0}' -f $del)) }
+        } else { & $kv 'Total commits' $sel.Count })),
         @(@{ Plain = ''; Ansi = '' }, @{ Plain = ''; Ansi = '' }),
         @((& $kv 'Repos' $activeRepos "/$repoCount"), (& $kv 'Unpushed' $unpushed)),
         @((& $kv 'Active days' $dayNames.Count "/$span"), (& $kv 'Longest streak' "$longest" ' days')),
@@ -231,8 +258,9 @@ function Show-TrueCommit {
     )
     $width = ($rows | ForEach-Object { $_[0].Plain.Length } | Measure-Object -Maximum).Maximum + 4
     foreach ($r in $rows) { $out += $r[0].Ansi + (' ' * ($width - $r[0].Plain.Length)) + $r[1].Ansi }
-    $out += Paint $Dim ("First commit {0} {3} Busiest day {1} commits {3} {2:N1} commits per active day" -f
-        ([datetime]$first).ToString('MMM d, yyyy', [cultureinfo]::InvariantCulture), $byDay[$topDay], ($sel.Count / $dayNames.Count), $Dot)
+    $out += Paint $Dim ("First commit {0} {4} Busiest day {1:N0} {3} {4} {2:N1} {3} per active day" -f
+        ([datetime]$first).ToString('MMM d, yyyy', [cultureinfo]::InvariantCulture), $byDay[$topDay], ($total / $dayNames.Count), $unit, $Dot)
+    if ($skipped) { $out += Paint $Dim "Not counted (all time): $skipped changes to generated, vendored or data files" }
     $out += ''
     $out += Paint $Lilac $(if ($unpushed) { "$unpushed of your commits exist only on this machine - GitHub has never seen them" } else { 'Everything is pushed. GitHub knows it all.' })
     $out | Write-Host

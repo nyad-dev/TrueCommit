@@ -18,7 +18,7 @@ jobs:
         shell: pwsh
         run: |
           ./install.ps1
-          $o = truecommit -Author . 6>&1 | Out-String; $o
+          $o = truecommit -Author . -Lines 6>&1 | Out-String; $o
           if ($o -notmatch 'Total commits') { exit 1 }
       - name: Windows PowerShell 5.1
         if: runner.os == 'Windows'

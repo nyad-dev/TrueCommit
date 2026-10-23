@@ -55,7 +55,16 @@ truecommit -Range 30d         # stats for the last 30 days (also: 7d, all)
 truecommit -Author me@x.com   # someone else's commits / a different email
 truecommit -GitHub            # also count commits that are only on GitHub (made on other machines)
 truecommit -Color green       # orange (default), green, blue, purple, pink, or any hex like #39d353
+truecommit -Lines             # lines of code changed instead of commits
 ```
+
+### Lines mode
+
+`-Lines` colors the heatmap by lines changed (added + removed) and shows `Lines: +added -removed`.
+It doesn't count what people rarely write by hand: binary files, data/asset formats (`.json`, `.obj`, `.gltf`,
+`.svg`, `.csv`, `.rbxmx`, `.rbxlx`, ...), lockfiles, minified files, `vendor`/`third_party`/`node_modules`/`dist`/`build`
+folders, and any single file with 5000+ changed lines in one commit. It has to diff every commit, so it is
+slower than the commit view (about the time of your largest repo, since repos are read in parallel).
 
 To keep a color, set it once in your `$PROFILE` (or shell rc on Linux/macOS):
 

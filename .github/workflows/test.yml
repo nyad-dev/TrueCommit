@@ -13,17 +13,17 @@ jobs:
       # -Author . matches every author: the runner has no user.email.
       - name: install.sh + bash command
         if: runner.os != 'Windows'
-        run: sh ./install.sh && ~/.local/bin/truecommit -Author . -Color green | tee /dev/stderr | grep -q 'Total commits'
+        run: sh ./install.sh && ~/.local/bin/truecommit -Author . -Color green | tee /dev/stderr | grep -q 'Favorite repo'
       - name: PowerShell 7
         shell: pwsh
         run: |
           ./install.ps1
           $o = truecommit -Author . -Lines 6>&1 | Out-String; $o
-          if ($o -notmatch 'Total commits') { exit 1 }
+          if ($o -notmatch 'Favorite repo') { exit 1 }
       - name: Windows PowerShell 5.1
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           ./install.ps1
           $o = truecommit -Author . 6>&1 | Out-String; $o
-          if ($o -notmatch 'Total commits') { exit 1 }
+          if ($o -notmatch 'Favorite repo') { exit 1 }

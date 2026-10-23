@@ -74,6 +74,7 @@ function Show-TrueCommit {
     if (-not $repos) { Write-Host "No git repositories found under $root"; return }
 
     $globalEmail = git config --global user.email
+    $global:LASTEXITCODE = 0   # "not a repo" / "no email" are expected answers, not failures for the caller
     $seen = [System.Collections.Generic.HashSet[string]]::new()
     $commits = [System.Collections.Generic.List[object]]::new()
     $unpushed = 0
